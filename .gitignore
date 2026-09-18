@@ -1,36 +1,70 @@
-# Rust build artifacts
-/target/
+```
+# Rust target directory
+target/
 
-# Database files
-*.db
-*.sqlite
-*.sqlite3
+# Cargo registry cache
+**/Cargo.lock
 
-# Environment files
+# Debug and release builds
+**/target/debug/**
+**/target/release/**
+
+# Compiled artifacts
+*.rlib
+*.rmeta
+*.so
+*.d
+*.o
+
+# Incremental compilation data
+**/incremental/**
+
+# Build scripts and fingerprints
+**/.fingerprint/**
+**/CACHEDIR.TAG
+**/.rustc_info.json
+
+# Dependencies downloaded by Cargo
+**/vendor/**
+**/registry/**
+
+# Local database files
+**/*.db
+**/*.db-journal
+
+# Temporary files
+*.tmp
+*.temp
+
+# Environment variables
 .env
 .env.local
-*.env.*
+.env.*
 
-# Node.js dependencies (if frontend is added later)
-node_modules/
-
-# Build artifacts
-dist/
-build/
-coverage/
-
-# Logs
-*.log
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE files
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Test files
-test_file.txt
+# Logs
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Coverage reports
+coverage/
+htmlcov/
+
+# Rust documentation
+**/doc/**
+
+# Benchmark results
+**/benches/**
+
+# Test binaries
+**/test-*
+
+```
