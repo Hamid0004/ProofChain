@@ -1,5 +1,4 @@
-use rusqlite::{Connection, params, OptionalExtension};
-use std::path::Path;
+use rusqlite::{Connection, params, OptionalExtension, Row};
 use crate::error::Result;
 use crate::ledger::models::Block;
 use chrono::Utc;
@@ -35,6 +34,34 @@ impl Database {
                 merkle_root TEXT,
                 block_hash TEXT NOT NULL,
                 anchor_tx_hash TEXT
+            )",
+            [],
+        )?;
+
+        // Create merkle_trees table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS merkle_trees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                root_hash TEXT NOT NULL UNIQUE,
+                leaf_count INTEGER NOT NULL,
+                anchored INTEGER NOT NULL DEFAULT 0,
+                anchor_tx_hash TEXT
+            )",
+            [],
+        )?;
+
+        // Create anchors table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS anchors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                merkle_tree_id INTEGER NOT NULL UNIQUE,
+                transaction_hash TEXT NOT NULL,
+                block_number INTEGER NOT NULL DEFAULT 0,
+                timestamp INTEGER NOT NULL,
+                network TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'confirmed',
+                FOREIGN KEY (merkle_tree_id) REFERENCES merkle_trees(id)
             )",
             [],
         )?;
@@ -265,11 +292,96 @@ impl Database {
 
         Ok((block_count as usize, is_valid))
     }
+    fn row_to_block(row: &Row<'_>) -> rusqlite::Result<Block> {
+        Ok(Block {
+            id: Some(row.get(0)?),
+            height: row.get(1)?,
+            timestamp: row.get(2)?,
+            prev_hash: row.get(3)?,
+            item_hash: row.get(4)?,
+            file_name: row.get(5)?,
+            file_size: row.get(6)?,
+            merkle_root: row.get(7)?,
+            block_hash: row.get(8)?,
+            anchor_tx_hash: row.get(9)?,
+        })
+    }
+
+    /// Get blocks not yet batched into a Merkle tree
+    pub fn get_unbatched_blocks(&self, limit: usize) -> Result<Vec<Block>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, height, timestamp, prev_hash, item_hash, file_name, file_size, merkle_root, block_hash, anchor_tx_hash
+             FROM blocks
+             WHERE merkle_root IS NULL AND height > 1 AND item_hash != ''
+             ORDER BY height ASC LIMIT ?1"
+        )?;
+        let mapped = stmt.query_map([limit], |row| Self::row_to_block(row))?;
+        let mut out = Vec::new();
+        for b in mapped { out.push(b?); }
+        Ok(out)
+    }
+
+    /// Create a Merkle tree batch record
+    pub fn create_merkle_batch(&self, root_hash: &str, leaf_count: usize) -> Result<i64> {
+        let created_at = Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO merkle_trees (created_at, root_hash, leaf_count, anchored) VALUES (?1, ?2, ?3, 0)",
+            params![created_at, root_hash, leaf_count as i64],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Mark blocks with their Merkle root
+    pub fn update_blocks_with_merkle_root(&self, block_ids: &[i64], merkle_root: &str) -> Result<()> {
+        for id in block_ids {
+            self.conn.execute("UPDATE blocks SET merkle_root = ?1 WHERE id = ?2", params![merkle_root, id])?;
+        }
+        Ok(())
+    }
+
+    /// Get latest unanchored Merkle tree (id, root_hash)
+    pub fn get_unanchored_merkle_tree(&self) -> Result<Option<(i64, String)>> {
+        let r = self.conn.query_row(
+            "SELECT id, root_hash FROM merkle_trees WHERE anchored = 0 ORDER BY created_at DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        Ok(r)
+    }
+
+    /// Save anchor and link it to tree + blocks
+    pub fn create_anchor(&self, merkle_tree_id: i64, tx_hash: &str, network: &str) -> Result<()> {
+        let ts = Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO anchors (merkle_tree_id, transaction_hash, block_number, timestamp, network, status) VALUES (?1, ?2, 0, ?3, ?4, 'confirmed')",
+            params![merkle_tree_id, tx_hash, ts, network],
+        )?;
+        self.conn.execute(
+            "UPDATE merkle_trees SET anchored = 1, anchor_tx_hash = ?1 WHERE id = ?2",
+            params![tx_hash, merkle_tree_id],
+        )?;
+        self.conn.execute(
+            "UPDATE blocks SET anchor_tx_hash = ?1 WHERE merkle_root = (SELECT root_hash FROM merkle_trees WHERE id = ?2)",
+            params![tx_hash, merkle_tree_id],
+        )?;
+        Ok(())
+    }
+
+    /// Anchoring statistics: (total trees, anchored trees, latest tx)
+    pub fn get_anchor_stats(&self) -> Result<(usize, usize, Option<String>)> {
+        let total: i64 = self.conn.query_row("SELECT COUNT(*) FROM merkle_trees", [], |row| row.get(0))?;
+        let anchored: i64 = self.conn.query_row("SELECT COUNT(*) FROM merkle_trees WHERE anchored = 1", [], |row| row.get(0))?;
+        let latest: Option<String> = self.conn.query_row(
+            "SELECT anchor_tx_hash FROM merkle_trees WHERE anchored = 1 ORDER BY created_at DESC LIMIT 1",
+            [], |row| row.get(0)).optional()?;
+        Ok((total as usize, anchored as usize, latest))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::NamedTempFile;
     use crate::ledger::hash;
 

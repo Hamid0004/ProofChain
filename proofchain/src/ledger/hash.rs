@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use sha2::{Sha256, Digest};
 use hex;
 use std::fs::File;
